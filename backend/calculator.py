@@ -1,4 +1,163 @@
 
+"""Safe expression evaluation and calculator state for NOVA Calculator."""
+from __future__ import annotations
+
+import ast
+import math
+import re
+
+from backend.history import CalculationHistory
+from backend.scientific import ScientificFunctions
+
+
+class CalculatorError(ValueError):
+    pass
+
+
+class InvalidExpressionError(CalculatorError):
+    pass
+
+
+class MathDomainError(CalculatorError):
+    pass
+
+
+class Calculator:
+    def __init__(self, angle_mode: str = "DEG", history: CalculationHistory | None = None):
+        self.scientific = ScientificFunctions(angle_mode)
+        self.history = history or CalculationHistory()
+        self._memory = 0.0
+        self._answer = 0.0
+
+    def set_angle_mode(self, mode: str) -> None:
+        self.scientific.set_angle_mode(mode)
+
+    def memory_store(self, value: float) -> float:
+        self._memory = float(value)
+        return self._memory
+
+    def memory_recall(self) -> float:
+        return self._memory
+
+    def memory_add(self, value: float) -> float:
+        self._memory += float(value)
+        return self._memory
+
+    def memory_subtract(self, value: float) -> float:
+        self._memory -= float(value)
+        return self._memory
+
+    def clear_memory(self) -> float:
+        self._memory = 0.0
+        return self._memory
+
+    def _normalize(self, expression: str) -> str:
+        if not isinstance(expression, str) or not expression.strip():
+            raise InvalidExpressionError("Expression cannot be empty.")
+        normalized = expression.strip()
+        normalized = normalized.replace("×", "*").replace("÷", "/").replace("−", "-")
+        normalized = normalized.replace("π", "pi")
+        normalized = re.sub(r"(?<![\w.])(\d+(?:\.\d+)?)%", r"(\1/100)", normalized)
+        return normalized
+
+    def evaluate(self, expression: str, save_history: bool = True) -> float:
+        normalized = self._normalize(expression)
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except (SyntaxError, ValueError) as error:
+            raise InvalidExpressionError("Invalid expression.") from error
+
+        try:
+            result = float(self._eval_node(tree.body))
+            if not math.isfinite(result):
+                raise MathDomainError("Result is outside the supported numeric range.")
+        except (InvalidExpressionError, MathDomainError):
+            raise
+        except (ArithmeticError, OverflowError, ZeroDivisionError, ValueError) as error:
+            raise MathDomainError(str(error)) from error
+
+        self._answer = result
+        if save_history:
+            self.history.add(normalized, result)
+        return int(result) if result.is_integer() else result
+
+    def _eval_node(self, node: ast.AST):
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise InvalidExpressionError("Only numeric constants are allowed.")
+            return node.value
+
+        if isinstance(node, ast.Name):
+            if node.id == "pi":
+                return math.pi
+            if node.id == "e":
+                return math.e
+            if node.id == "ans":
+                return self._answer
+            raise InvalidExpressionError(f"Unknown name: {node.id}")
+
+        if isinstance(node, ast.UnaryOp):
+            value = self._eval_node(node.operand)
+            if isinstance(node.op, ast.UAdd):
+                return value
+            if isinstance(node.op, ast.USub):
+                return -value
+            raise InvalidExpressionError("Unsupported unary operation.")
+
+        if isinstance(node, ast.BinOp):
+            left = self._eval_node(node.left)
+            right = self._eval_node(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                if right == 0:
+                    raise ZeroDivisionError("Division by zero.")
+                return left / right
+            if isinstance(node.op, ast.Pow):
+                result = left ** right
+                if isinstance(result, complex):
+                    raise MathDomainError("Complex results are not supported.")
+                return result
+            if isinstance(node.op, ast.Mod):
+                raise InvalidExpressionError("Modulo is not supported.")
+            raise InvalidExpressionError("Unsupported binary operation.")
+
+        if isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.keywords:
+                raise InvalidExpressionError("Invalid function call.")
+            methods = {
+                "sin": self.scientific.sin,
+                "cos": self.scientific.cos,
+                "tan": self.scientific.tan,
+                "asin": self.scientific.asin,
+                "acos": self.scientific.acos,
+                "atan": self.scientific.atan,
+                "sqrt": self.scientific.sqrt,
+                "log": self.scientific.log,
+                "ln": self.scientific.ln,
+                "factorial": self.scientific.factorial,
+                "abs": self.scientific.abs,
+                "exp": self.scientific.exp,
+            }
+            if node.func.id not in methods:
+                raise InvalidExpressionError(f"Unknown function: {node.func.id}")
+            arguments = [self._eval_node(argument) for argument in node.args]
+            if node.func.id == "log" and len(arguments) not in (1, 2):
+                raise InvalidExpressionError("log expects one or two arguments.")
+            if node.func.id != "log" and len(arguments) != 1:
+                raise InvalidExpressionError(f"{node.func.id} expects one argument.")
+            try:
+                return methods[node.func.id](*arguments)
+            except (ValueError, OverflowError) as error:
+                raise MathDomainError(str(error)) from error
+
+        raise InvalidExpressionError("Unsupported expression.")
+
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
@@ -11,9 +170,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QMessageBox
 )
-
-from backend.calculator import calculator
-
 
 class CalculatorPage(QWidget):
 
