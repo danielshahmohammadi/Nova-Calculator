@@ -1,182 +1,423 @@
-"""Safe expression evaluator and calculator state for NOVA Calculator."""
-from __future__ import annotations
 
-import ast
-import math
-import operator
-import re
-from typing import Callable
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QGridLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QMessageBox
+)
 
-from .history import CalculationHistory
-from .operations import percentage
-from .scientific import ScientificFunctions
-
-
-class CalculatorError(Exception):
-    """Base class for calculator errors."""
-
-
-class InvalidExpressionError(CalculatorError):
-    """Raised when an expression contains unsupported syntax."""
+from backend.calculator import calculator
 
 
-class MathDomainError(CalculatorError):
-    """Raised when a mathematical operation is undefined."""
+class CalculatorPage(QWidget):
 
+    def __init__(self, main_window):
+        super().__init__()
 
-_BINARY_OPERATORS: dict[type, Callable] = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-    ast.Mod: operator.mod,
-}
-_UNARY_OPERATORS: dict[type, Callable] = {
-    ast.UAdd: operator.pos,
-    ast.USub: operator.neg,
-}
-_MAX_EXPRESSION_LENGTH = 300
-_MAX_AST_NODES = 100
-_MAX_ABS_RESULT = 1e300
+        self.main_window = main_window
 
+        self.calculator = calculator(
+            angle_mode=main_window.angle_mode
+        )
 
-class Calculator:
-    """Calculator engine. Percent is postfix fraction: 25% evaluates to 0.25."""
+        self.scientific_mode = False
+        self.last_result = None
 
-    def __init__(
-        self,
-        angle_mode: str = "DEG",
-        history: CalculationHistory | None = None,
-    ):
-        self.scientific = ScientificFunctions(angle_mode)
-        self.history = history or CalculationHistory()
-        self.memory = 0.0
-        self.last_result = 0.0
+        self.create_ui()
+        self.create_shortcuts()
 
-    @property
-    def angle_mode(self) -> str:
-        return self.scientific.angle_mode
+    def create_ui(self):
 
-    def set_angle_mode(self, mode: str) -> None:
-        self.scientific.set_angle_mode(mode)
+        main_layout = QVBoxLayout(self)
 
-    def clear_memory(self) -> None:
-        self.memory = 0.0
+        main_layout.setContentsMargins(42, 30, 42, 30)
+        main_layout.setSpacing(15)
 
-    def memory_recall(self) -> float:
-        return self.memory
+        # Header
+        header = QHBoxLayout()
 
-    def memory_add(self, value: float) -> float:
-        self.memory += self._finite_number(value)
-        return self.memory
+        title = QLabel("NOVA Calculator")
+        title.setObjectName("pageTitle")
 
-    def memory_subtract(self, value: float) -> float:
-        self.memory -= self._finite_number(value)
-        return self.memory
+        header.addWidget(title)
+        header.addStretch()
 
-    def memory_store(self, value: float) -> float:
-        self.memory = self._finite_number(value)
-        return self.memory
+        self.mode_label = QLabel("DEG")
+        self.mode_label.setObjectName("modeLabel")
 
-    def evaluate(self, expression: str, *, save_history: bool = True) -> float:
-        if not isinstance(expression, str):
-            raise InvalidExpressionError("عبارت باید متن باشد.")
-        source = expression.strip()
-        if not source:
-            raise InvalidExpressionError("عبارت محاسباتی خالی است.")
-        if len(source) > _MAX_EXPRESSION_LENGTH:
-            raise InvalidExpressionError("طول عبارت بیش از حد مجاز است.")
+        header.addWidget(self.mode_label)
 
-        # Allow common calculator symbols without permitting arbitrary Python syntax.
-        source = source.replace("×", "*").replace("÷", "/").replace("−", "-")
-        source = source.replace("π", "pi").replace("√", "sqrt")
-        # A postfix percent is converted into division by 100.
-        source = re.sub(r"(?<=[0-9.)])\s*%", "/100", source)
+        self.scientific_button = QPushButton("Scientific Mode")
+        self.scientific_button.setObjectName("operatorButton")
+
+        self.scientific_button.clicked.connect(
+            self.toggle_scientific_mode
+        )
+
+        header.addWidget(self.scientific_button)
+
+        main_layout.addLayout(header)
+
+        # Expression input
+        self.expression = QLineEdit()
+
+        self.expression.setObjectName("expressionInput")
+        self.expression.setPlaceholderText("Enter an expression...")
+        self.expression.setAlignment(Qt.AlignRight)
+        self.expression.setMinimumHeight(60)
+
+        self.expression.returnPressed.connect(self.calculate)
+
+        main_layout.addWidget(self.expression)
+
+        # Result
+        self.result_label = QLabel("0")
+
+        self.result_label.setObjectName("resultLabel")
+        self.result_label.setAlignment(
+            Qt.AlignRight | Qt.AlignVCenter
+        )
+
+        self.result_label.setMinimumHeight(60)
+
+        main_layout.addWidget(self.result_label)
+
+        # Memory buttons
+        memory_layout = QHBoxLayout()
+
+        memory_buttons = [
+            ("MC", self.memory_clear),
+            ("MR", self.memory_recall),
+            ("M+", self.memory_add),
+            ("M−", self.memory_subtract),
+            ("MS", self.memory_store)
+        ]
+
+        for text, function in memory_buttons:
+
+            button = QPushButton(text)
+            button.setObjectName("operatorButton")
+            button.setMinimumHeight(42)
+
+            button.clicked.connect(function)
+
+            memory_layout.addWidget(button)
+
+        main_layout.addLayout(memory_layout)
+
+        # Scientific buttons
+        self.scientific_widget = QWidget()
+
+        scientific_layout = QGridLayout(
+            self.scientific_widget
+        )
+
+        scientific_layout.setSpacing(8)
+
+        scientific_buttons = [
+            ["sin", "cos", "tan", "asin", "acos"],
+            ["atan", "sqrt", "log", "ln", "exp"],
+            ["factorial", "abs", "(", ")", "ans"]
+        ]
+
+        for row, values in enumerate(scientific_buttons):
+
+            for col, value in enumerate(values):
+
+                button = QPushButton(value)
+
+                button.setObjectName("operatorButton")
+                button.setMinimumHeight(42)
+
+                button.clicked.connect(
+                    lambda checked=False, v=value:
+                    self.add_scientific_function(v)
+                )
+
+                scientific_layout.addWidget(
+                    button,
+                    row,
+                    col
+                )
+
+        self.scientific_widget.setVisible(False)
+
+        main_layout.addWidget(self.scientific_widget)
+
+        # Main calculator buttons
+        grid = QGridLayout()
+        grid.setSpacing(9)
+
+        buttons = [
+            ["AC", "DEL", "(", ")"],
+            ["7", "8", "9", "÷"],
+            ["4", "5", "6", "×"],
+            ["1", "2", "3", "−"],
+            ["0", ".", "%", "+"],
+            ["ANS", "!", "=", " "]
+        ]
+
+        for row, values in enumerate(buttons):
+
+            for col, value in enumerate(values):
+
+                if value == " ":
+                    continue
+
+                button = QPushButton(value)
+
+                button.setMinimumHeight(55)
+                button.setCursor(Qt.PointingHandCursor)
+
+                if value.isdigit() or value == ".":
+                    button.setObjectName("numberButton")
+                else:
+                    button.setObjectName("operatorButton")
+
+                button.clicked.connect(
+                    lambda checked=False, v=value:
+                    self.handle_button(v)
+                )
+
+                grid.addWidget(button, row, col)
+
+        main_layout.addLayout(grid)
+        main_layout.addStretch()
+
+        hint = QLabel(
+            "Enter: Calculate    |    Esc: Clear    |    "
+            "Backspace: Delete"
+        )
+
+        hint.setObjectName("hint")
+
+        main_layout.addWidget(hint)
+
+    # Keyboard shortcuts
+    def create_shortcuts(self):
+
+        self.enter_shortcut = QShortcut(
+            QKeySequence("Escape"),
+            self
+        )
+
+        self.enter_shortcut.activated.connect(
+            self.clear_all
+        )
+
+        self.delete_shortcut = QShortcut(
+            QKeySequence("Backspace"),
+            self
+        )
+
+        self.delete_shortcut.activated.connect(
+            self.delete_last
+        )
+
+    # Scientific mode
+    def toggle_scientific_mode(self):
+
+        self.scientific_mode = not self.scientific_mode
+
+        self.scientific_widget.setVisible(
+            self.scientific_mode
+        )
+
+        if self.scientific_mode:
+            self.scientific_button.setText("Basic Mode")
+        else:
+            self.scientific_button.setText("Scientific Mode")
+
+    def add_scientific_function(self, value):
+
+        current = self.expression.text()
+
+        if value == "ans":
+            text = "ans"
+
+        elif value == "factorial":
+            text = "factorial("
+
+        elif value in ("(", ")"):
+            text = value
+
+        else:
+            text = value + "("
+
+        self.expression.insert(text)
+        self.expression.setFocus()
+
+    # Main buttons
+    def handle_button(self, value):
+
+        if value == "AC":
+            self.clear_all()
+
+        elif value == "DEL":
+            self.delete_last()
+
+        elif value == "=":
+            self.calculate()
+
+        elif value == "ANS":
+            self.expression.insert("ans")
+
+        elif value == "!":
+            self.expression.insert("factorial(")
+
+        elif value in ("×", "÷", "−"):
+
+            symbols = {
+                "×": "*",
+                "÷": "/",
+                "−": "-"
+            }
+
+            self.expression.insert(symbols[value])
+
+        else:
+            self.expression.insert(value)
+
+        self.expression.setFocus()
+
+    def clear_all(self):
+
+        self.expression.clear()
+        self.result_label.setText("0")
+
+    def delete_last(self):
+
+        current = self.expression.text()
+
+        if current:
+            self.expression.setText(current[:-1])
+
+        self.expression.setFocus()
+        self.expression.setCursorPosition(
+            len(self.expression.text())
+        )
+
+    # Calculation
+    def calculate(self):
+
+        expression = self.expression.text().strip()
+
+        if not expression:
+            return
 
         try:
-            tree = ast.parse(source, mode="eval")
-            if sum(1 for _ in ast.walk(tree)) > _MAX_AST_NODES:
-                raise InvalidExpressionError("عبارت بیش از حد پیچیده است.")
-            result = self._evaluate_node(tree.body)
-            result = self._finite_number(result)
-        except CalculatorError:
-            raise
-        except ZeroDivisionError as exc:
-            raise MathDomainError("تقسیم بر صفر مجاز نیست.") from exc
-        except (ValueError, OverflowError) as exc:
-            raise MathDomainError(str(exc) or "عملیات ریاضی نامعتبر است.") from exc
-        except (SyntaxError, TypeError, KeyError, AttributeError) as exc:
-            raise InvalidExpressionError("ساختار عبارت محاسباتی معتبر نیست.") from exc
 
-        self.last_result = result
-        if save_history:
-            self.history.add(expression.strip(), result)
-        return result
+            result = self.calculator.evaluate(expression)
 
-    def _evaluate_node(self, node: ast.AST) -> float:
-        if isinstance(node, ast.Constant):
-            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
-                raise InvalidExpressionError("فقط اعداد مجاز هستند.")
-            return self._finite_number(node.value)
+            self.last_result = result
 
-        if isinstance(node, ast.Name):
-            constants = {"pi": math.pi, "e": math.e, "ans": self.last_result}
-            if node.id in constants:
-                return constants[node.id]
-            raise InvalidExpressionError(f"ثابت یا نام ناشناخته: {node.id}")
+            self.result_label.setText(str(result))
 
-        if isinstance(node, ast.BinOp):
-            operation = _BINARY_OPERATORS.get(type(node.op))
-            if operation is None:
-                raise InvalidExpressionError("این عملگر پشتیبانی نمی‌شود.")
-            left = self._evaluate_node(node.left)
-            right = self._evaluate_node(node.right)
-            if isinstance(node.op, ast.Pow) and abs(right) > 1000:
-                raise MathDomainError("توان واردشده بیش از حد بزرگ است.")
-            return self._finite_number(operation(left, right))
+        except Exception as error:
 
-        if isinstance(node, ast.UnaryOp):
-            operation = _UNARY_OPERATORS.get(type(node.op))
-            if operation is None:
-                raise InvalidExpressionError("این عملگر یکانی پشتیبانی نمی‌شود.")
-            return self._finite_number(operation(self._evaluate_node(node.operand)))
+            QMessageBox.warning(
+                self,
+                "Calculation Error",
+                str(error)
+            )
 
-        if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name) or node.keywords:
-                raise InvalidExpressionError("نحوه فراخوانی تابع معتبر نیست.")
-            functions = {
-                "sin": self.scientific.sin,
-                "cos": self.scientific.cos,
-                "tan": self.scientific.tan,
-                "asin": self.scientific.asin,
-                "acos": self.scientific.acos,
-                "atan": self.scientific.atan,
-                "sqrt": self.scientific.sqrt,
-                "log": self.scientific.log,
-                "ln": self.scientific.ln,
-                "factorial": self.scientific.factorial,
-                "abs": self.scientific.abs,
-                "exp": self.scientific.exp,
-            }
-            function = functions.get(node.func.id)
-            if function is None:
-                raise InvalidExpressionError("این تابع علمی پشتیبانی نمی‌شود.")
-            args = [self._evaluate_node(arg) for arg in node.args]
-            if node.func.id == "log":
-                if len(args) not in (1, 2):
-                    raise InvalidExpressionError("log به یک یا دو آرگومان نیاز دارد.")
-            elif len(args) != 1:
-                raise InvalidExpressionError("این تابع دقیقاً یک آرگومان می‌پذیرد.")
-            return self._finite_number(function(*args))
+    # Angle mode
+    def update_angle_mode(self, mode):
 
-        raise InvalidExpressionError("این نوع عبارت مجاز نیست.")
+        self.mode_label.setText(mode)
 
-    @staticmethod
-    def _finite_number(value: float) -> float:
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise InvalidExpressionError("نتیجه عددی معتبر نیست.")
-        number = float(value)
-        if not math.isfinite(number) or abs(number) > _MAX_ABS_RESULT:
-            raise MathDomainError("نتیجه خارج از محدوده قابل پشتیبانی است.")
-        return number
+        self.calculator.set_angle_mode(mode)
+
+    # Memory functions
+    def get_current_result(self):
+
+        if self.last_result is None:
+            raise ValueError("There is no result to store.")
+
+        return float(self.last_result)
+
+    def memory_store(self):
+
+        try:
+
+            value = self.get_current_result()
+
+            self.calculator.memory_store(value)
+
+        except Exception as error:
+
+            QMessageBox.warning(
+                self,
+                "Memory Error",
+                str(error)
+            )
+
+    def memory_recall(self):
+
+        try:
+
+            value = self.calculator.memory_recall()
+
+            self.expression.insert(str(value))
+
+            self.expression.setFocus()
+
+        except Exception as error:
+
+            QMessageBox.warning(
+                self,
+                "Memory Error",
+                str(error)
+            )
+
+    def memory_add(self):
+
+        try:
+
+            value = self.get_current_result()
+
+            self.calculator.memory_add(value)
+
+        except Exception as error:
+
+            QMessageBox.warning(
+                self,
+                "Memory Error",
+                str(error)
+            )
+
+    def memory_subtract(self):
+
+        try:
+
+            value = self.get_current_result()
+
+            self.calculator.memory_subtract(value)
+
+        except Exception as error:
+
+            QMessageBox.warning(
+                self,
+                "Memory Error",
+                str(error)
+            )
+
+    def memory_clear(self):
+
+        try:
+
+            self.calculator.clear_memory()
+
+        except Exception as error:
+
+            QMessageBox.warning(
+                self,
+                "Memory Error",
+                str(error)
+            )
